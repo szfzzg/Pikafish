@@ -17,3 +17,7 @@ src/-lstdc++.res
 # Python cache
 __pycache__/
 
+# Android build
+app/android/build/
+app/android/debug.keystore
+
