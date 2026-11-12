@@ -21,6 +21,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -31,7 +32,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -45,7 +45,6 @@ import java.util.Locale;
  */
 public class MainActivity extends Activity implements BoardView.Listener {
 
-    private static final char HUMAN = Board.RED;
     private static final String PREFS = "pikafish_engine_settings";
 
     private static final int REQ_RED_ENGINE = 101;
@@ -57,6 +56,9 @@ public class MainActivity extends Activity implements BoardView.Listener {
             "快速（0.5 秒）", "普通（1.5 秒）", "较强（3 秒）", "最强（5 秒）"
     };
     private static final int[] DIFFICULTY_MS = {500, 1500, 3000, 5000};
+    private static final String[] SIDE_NAMES = {"红方（先行）", "黑方（后行）"};
+
+    private char humanSide = Board.RED;
 
     private Board board = new Board();
     private final List<HistoryEntry> history = new ArrayList<>();
@@ -106,6 +108,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
     private Button settingsButton;
     private CheckBox engineVsEngineBox;
     private Spinner strengthSpinner;
+    private Spinner sideSpinner;
     private AlertDialog settingsDialog;
 
     private SoundPool soundPool;
@@ -138,6 +141,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
 
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         loadEngineSettings();
+        humanSide = "b".equals(prefs.getString("human_side", "r")) ? Board.BLACK : Board.RED;
 
         buildUi();
         initSound();
@@ -267,6 +271,41 @@ public class MainActivity extends Activity implements BoardView.Listener {
         settingsParams.leftMargin = dp(10);
         modeRow.addView(settingsButton, settingsParams);
         root.addView(modeRow, modeParams);
+
+        LinearLayout sideRow = new LinearLayout(this);
+        sideRow.setOrientation(LinearLayout.HORIZONTAL);
+        sideRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams sideParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sideParams.topMargin = dp(8);
+        TextView sideLabel = new TextView(this);
+        sideLabel.setText("执子：");
+        sideLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        sideLabel.setTextColor(0xFF5B3A1E);
+        sideSpinner = new Spinner(this);
+        ArrayAdapter<String> sideAdapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, SIDE_NAMES);
+        sideAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        sideSpinner.setAdapter(sideAdapter);
+        sideSpinner.setSelection(humanSide == Board.RED ? 0 : 1, false);
+        sideSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                char side = position == 0 ? Board.RED : Board.BLACK;
+                if (side != humanSide && !engineVsEngine && !importing) {
+                    requestHumanSide(side);
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        sideRow.addView(sideLabel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        sideRow.addView(sideSpinner, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        root.addView(sideRow, sideParams);
 
         LinearLayout strengthRow = new LinearLayout(this);
         strengthRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -457,7 +496,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
             String label = side == Board.RED ? redNetLabel : blackNetLabel;
             return label.isEmpty() ? new File(path).getName() : label;
         }
-        return enginePathPref(side).isEmpty() ? "内置 NNUE" : "未设置（使用引擎内置网络）";
+        return enginePathPref(side).isEmpty() ? "内置 NNUE" : "未设置（需引擎自带网络）";
     }
 
     private UciEngine engineFor(char side) {
@@ -695,17 +734,50 @@ public class MainActivity extends Activity implements BoardView.Listener {
             }
             return;
         }
-        if (side == HUMAN) {
-            setStatus("轮到你走棋（红方）");
+        if (side == humanSide) {
+            armClock();
+            setStatus("轮到你走棋（" + sideName(humanSide) + "）");
             return;
         }
-        if (isReady(Board.BLACK)) {
+        if (isReady(side)) {
             startEngineTurn();
-        } else if (isFailed(Board.BLACK)) {
-            setStatus("黑方引擎不可用，请检查引擎设置");
+        } else if (isFailed(side)) {
+            setStatus(sideName(side) + "引擎不可用，请检查引擎设置");
         } else {
-            setStatus("等待黑方引擎加载…");
+            setStatus("等待" + sideName(side) + "引擎加载…");
         }
+    }
+
+    private char opponentSide() {
+        return humanSide == Board.RED ? Board.BLACK : Board.RED;
+    }
+
+    private void requestHumanSide(char side) {
+        if (side == humanSide) {
+            return;
+        }
+        if (history.isEmpty()) {
+            applyHumanSide(side);
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("切换执子")
+                .setMessage("切换执子将开始新对局，是否继续？")
+                .setPositiveButton("切换", (dialog, which) -> applyHumanSide(side))
+                .setNegativeButton("取消", (dialog, which) ->
+                        sideSpinner.setSelection(humanSide == Board.RED ? 0 : 1, false))
+                .show();
+    }
+
+    private void applyHumanSide(char side) {
+        humanSide = side;
+        prefs.edit().putString("human_side", side == Board.RED ? "r" : "b").apply();
+        if (engineVsEngine) {
+            engineVsEngine = false;
+            engineVsEngineBox.setChecked(false);
+        }
+        newGame();
+        updateControls();
     }
 
     // ---------------------------------------------------------------------
@@ -982,11 +1054,11 @@ public class MainActivity extends Activity implements BoardView.Listener {
 
     @Override
     public void onSquareTap(int r, int c) {
-        if (importing || busy || gameOver || engineVsEngine || board.side != HUMAN) {
+        if (importing || busy || gameOver || engineVsEngine || board.side != humanSide) {
             return;
         }
         char piece = board.grid[r][c];
-        if (piece != '.' && Board.colorOf(piece) == HUMAN) {
+        if (piece != '.' && Board.colorOf(piece) == humanSide) {
             selectedR = r;
             selectedC = c;
             legalForSelected.clear();
@@ -1036,7 +1108,9 @@ public class MainActivity extends Activity implements BoardView.Listener {
         } else {
             maybeStartEngineTurn();
             if (!busy) {
-                setStatus(board.side == HUMAN ? "轮到你走棋（红方）" : "黑方引擎思考中…");
+                setStatus(board.side == humanSide
+                        ? "轮到你走棋（" + sideName(humanSide) + "）"
+                        : sideName(board.side) + "引擎思考中…");
             }
         }
     }
@@ -1046,8 +1120,8 @@ public class MainActivity extends Activity implements BoardView.Listener {
             return;
         }
         final char side = board.side;
-        if (!engineVsEngine && side == HUMAN) {
-            setStatus("轮到你走棋（红方）");
+        if (!engineVsEngine && side == humanSide) {
+            setStatus("轮到你走棋（" + sideName(humanSide) + "）");
             return;
         }
         if (!isReady(side)) {
@@ -1059,6 +1133,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
         if (engine == null) {
             return;
         }
+        armClock();
         busy = true;
         busySide = side;
         final long gen = ++generation;
@@ -1159,8 +1234,15 @@ public class MainActivity extends Activity implements BoardView.Listener {
             blackTotalMs += moveMs;
             blackLastMoveMs = moveMs;
         }
-        timingSide = board.side;
-        currentMoveStartMs = now;
+        char nextSide = board.side;
+        boolean nextCanAct = (nextSide == humanSide && !engineVsEngine) || isReady(nextSide);
+        if (nextCanAct) {
+            timingSide = nextSide;
+            currentMoveStartMs = now;
+        } else {
+            timingSide = 0;
+            currentMoveStartMs = -1;
+        }
         updateTimerLabels();
         updateMoveList();
     }
@@ -1185,7 +1267,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
             return;
         }
         cancelEngines();
-        int count = history.get(history.size() - 1).side == HUMAN
+        int count = history.get(history.size() - 1).side == humanSide
                 ? 1 : Math.min(2, history.size());
         HistoryEntry entry = null;
         for (int i = 0; i < count; i++) {
@@ -1208,10 +1290,11 @@ public class MainActivity extends Activity implements BoardView.Listener {
     }
 
     private void startAnalysis() {
-        if (busy || importing || engineVsEngine || !blackReady) {
+        final char analysisSide = opponentSide();
+        if (busy || importing || engineVsEngine || !isReady(analysisSide)) {
             return;
         }
-        final UciEngine engine = blackEngine;
+        final UciEngine engine = engineFor(analysisSide);
         if (engine == null) {
             return;
         }
@@ -1227,7 +1310,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
         engine.analyze(fen, 2500, 3, new UciEngine.AnalysisListener() {
             @Override
             public void onInfo(UciEngine.Info info) {
-                if (gen != generation || engineFor(Board.BLACK) != engine) {
+                if (gen != generation || engineFor(analysisSide) != engine) {
                     return;
                 }
                 analysisView.setText("分析中…\n深度 " + info.depth
@@ -1236,7 +1319,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
 
             @Override
             public void onDone(List<UciEngine.Info> lines) {
-                if (gen != generation || engineFor(Board.BLACK) != engine) {
+                if (gen != generation || engineFor(analysisSide) != engine) {
                     return;
                 }
                 busy = false;
@@ -1261,7 +1344,16 @@ public class MainActivity extends Activity implements BoardView.Listener {
         blackTotalMs = 0;
         redLastMoveMs = 0;
         blackLastMoveMs = 0;
-        timingSide = gameOver ? 0 : board.side;
+        timingSide = 0;
+        currentMoveStartMs = -1;
+        updateTimerLabels();
+    }
+
+    private void armClock() {
+        if (gameOver || timingSide != 0) {
+            return;
+        }
+        timingSide = board.side;
         currentMoveStartMs = SystemClock.elapsedRealtime();
         updateTimerLabels();
     }
@@ -1280,8 +1372,8 @@ public class MainActivity extends Activity implements BoardView.Listener {
                 blackLastMoveMs = entry.moveMs;
             }
         }
-        timingSide = gameOver ? 0 : board.side;
-        currentMoveStartMs = SystemClock.elapsedRealtime();
+        timingSide = 0;
+        currentMoveStartMs = -1;
         updateTimerLabels();
     }
 
@@ -1336,7 +1428,9 @@ public class MainActivity extends Activity implements BoardView.Listener {
                     .append(entry.side == Board.RED ? "红方 " : "黑方 ")
                     .append(Board.pieceName(entry.piece)).append(' ')
                     .append(entry.uci.substring(0, 2)).append('-')
-                    .append(entry.uci.substring(2, 4)).append('\n');
+                    .append(entry.uci.substring(2, 4))
+                    .append(String.format(Locale.US, "  %.1fs", entry.moveMs / 1000.0))
+                    .append('\n');
         }
         movesView.setText(sb.toString());
     }
@@ -1345,9 +1439,12 @@ public class MainActivity extends Activity implements BoardView.Listener {
         boolean idle = !busy && !importing;
         setControlEnabled(newButton, !importing);
         setControlEnabled(undoButton, !importing && !history.isEmpty());
-        setControlEnabled(analyzeButton, idle && !engineVsEngine && blackReady);
+        setControlEnabled(analyzeButton, idle && !engineVsEngine && isReady(opponentSide()));
         setControlEnabled(settingsButton, !importing);
         engineVsEngineBox.setEnabled(!importing);
+        boolean sideSelectable = !importing && !engineVsEngine;
+        sideSpinner.setEnabled(sideSelectable);
+        sideSpinner.setAlpha(sideSelectable ? 1f : 0.45f);
         strengthSpinner.setEnabled(!importing);
         strengthSpinner.setAlpha(importing ? 0.45f : 1f);
     }

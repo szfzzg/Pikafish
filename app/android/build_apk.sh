@@ -28,16 +28,28 @@ STRIP="$TOOLCHAIN/llvm-strip"
 BUILD="$APP_DIR/build"
 APK="$APP_DIR/../PikafishXiangqi.apk"
 
-for path in "$BT/aapt2" "$PLATFORM/android.jar" "$CXX"; do
+ENGINE="$BUILD/libpikafish.so"
+PREBUILT_ENGINE="$APP_DIR/prebuilt/libpikafish.so"
+PREBUILT_NET="$APP_DIR/prebuilt/pikafish.nnue"
+
+for path in "$BT/aapt2" "$PLATFORM/android.jar"; do
     if [ ! -e "$path" ]; then
         echo "缺少构建组件：$path" >&2
-        echo "请先安装：platforms;android-$COMPILE_API build-tools;$BT_VERSION ndk;$NDK_VERSION" >&2
+        echo "请先安装：platforms;android-$COMPILE_API build-tools;$BT_VERSION" >&2
         exit 1
     fi
 done
+if [ ! -f "$PREBUILT_ENGINE" ] && [ ! -x "$CXX" ]; then
+    echo "缺少 NDK 编译器：$CXX，且没有预编译引擎 $PREBUILT_ENGINE" >&2
+    exit 1
+fi
 
-if [ ! -f "$REPO_DIR/src/pikafish.nnue" ]; then
-    echo "缺少 NNUE 网络：$REPO_DIR/src/pikafish.nnue" >&2
+NET_FILE="$REPO_DIR/src/pikafish.nnue"
+if [ ! -f "$NET_FILE" ] && [ -f "$PREBUILT_NET" ]; then
+    NET_FILE="$PREBUILT_NET"
+fi
+if [ ! -f "$NET_FILE" ]; then
+    echo "缺少 NNUE 网络：$REPO_DIR/src/pikafish.nnue 或 $PREBUILT_NET" >&2
     exit 1
 fi
 
@@ -45,41 +57,46 @@ rm -rf "$BUILD"
 mkdir -p "$BUILD/obj" "$BUILD/gen" "$BUILD/classes" "$BUILD/dex" \
          "$BUILD/assets" "$BUILD/stage/lib/arm64-v8a"
 
-echo "==> 编译 arm64 引擎"
-SOURCES=(
-    main.cpp benchmark.cpp bitboard.cpp evaluate.cpp misc.cpp movegen.cpp
-    movepick.cpp position.cpp search.cpp thread.cpp timeman.cpp tt.cpp tune.cpp
-    uci.cpp ucioption.cpp
-    nnue/evaluate_nnue.cpp
-    nnue/features/half_ka_v2_hm.cpp
-    external/zip.cpp
-)
-CXXFLAGS=(
-    -std=c++17 -O3 -DNDEBUG -DIS_64BIT -DUSE_PTHREADS -DUSE_NEON=8
-    -march=armv8-a -fno-exceptions -fPIE -I"$REPO_DIR/src"
-)
-ENGINE="$BUILD/libpikafish.so"
-PIDS=()
-COUNT=0
-for src in "${SOURCES[@]}"; do
-    obj="$BUILD/obj/$(basename "${src%.cpp}").o"
-    "$CXX" "${CXXFLAGS[@]}" -c "$REPO_DIR/src/$src" -o "$obj" &
-    PIDS+=($!)
-    COUNT=$((COUNT + 1))
-    if [ $((COUNT % 3)) -eq 0 ]; then
-        for pid in "${PIDS[@]}"; do wait "$pid"; done
-        PIDS=()
-    fi
-done
-for pid in "${PIDS[@]}"; do wait "$pid"; done
+if [ -f "$PREBUILT_ENGINE" ]; then
+    echo "==> 使用预编译 arm64 引擎"
+    cp "$PREBUILT_ENGINE" "$ENGINE"
+    chmod +x "$ENGINE"
+else
+    echo "==> 编译 arm64 引擎"
+    SOURCES=(
+        main.cpp benchmark.cpp bitboard.cpp evaluate.cpp misc.cpp movegen.cpp
+        movepick.cpp position.cpp search.cpp thread.cpp timeman.cpp tt.cpp tune.cpp
+        uci.cpp ucioption.cpp
+        nnue/evaluate_nnue.cpp
+        nnue/features/half_ka_v2_hm.cpp
+        external/zip.cpp
+    )
+    CXXFLAGS=(
+        -std=c++17 -O3 -DNDEBUG -DIS_64BIT -DUSE_PTHREADS -DUSE_NEON=8
+        -march=armv8-a -fno-exceptions -fPIE -I"$REPO_DIR/src"
+    )
+    PIDS=()
+    COUNT=0
+    for src in "${SOURCES[@]}"; do
+        obj="$BUILD/obj/$(basename "${src%.cpp}").o"
+        "$CXX" "${CXXFLAGS[@]}" -c "$REPO_DIR/src/$src" -o "$obj" &
+        PIDS+=($!)
+        COUNT=$((COUNT + 1))
+        if [ $((COUNT % 3)) -eq 0 ]; then
+            for pid in "${PIDS[@]}"; do wait "$pid"; done
+            PIDS=()
+        fi
+    done
+    for pid in "${PIDS[@]}"; do wait "$pid"; done
 
-"$CXX" -pie -o "$ENGINE" "$BUILD"/obj/*.o \
-    -static-libstdc++ -pthread -lm -Wl,--no-undefined -Wl,-z,max-page-size=16384
-"$STRIP" --strip-unneeded "$ENGINE"
+    "$CXX" -pie -o "$ENGINE" "$BUILD"/obj/*.o \
+        -static-libstdc++ -pthread -lm -Wl,--no-undefined -Wl,-z,max-page-size=16384
+    "$STRIP" --strip-unneeded "$ENGINE"
+fi
 file "$ENGINE"
 
 echo "==> 打包资源与代码"
-cp "$REPO_DIR/src/pikafish.nnue" "$BUILD/assets/pikafish.nnue"
+cp "$NET_FILE" "$BUILD/assets/pikafish.nnue"
 
 "$BT/aapt2" compile --dir "$APP_DIR/res" -o "$BUILD/res.zip"
 "$BT/aapt2" link -o "$BUILD/base.apk" \
