@@ -58,6 +58,7 @@ public class UciEngine {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<String> recent = Collections.synchronizedList(new ArrayList<>());
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final Object writeLock = new Object();
 
     private Process process;
     private BufferedWriter writer;
@@ -67,6 +68,23 @@ public class UciEngine {
         this.listener = listener;
         Thread worker = new Thread(() -> runEngine(enginePath, netPath), "pikafish-engine");
         worker.start();
+    }
+
+    /**
+     * 立即停止当前搜索；搜索线程会收到 bestmove 并继续处理后续任务。
+     */
+    public void stopSearch() {
+        synchronized (writeLock) {
+            try {
+                if (writer != null) {
+                    writer.write("stop");
+                    writer.newLine();
+                    writer.flush();
+                }
+            } catch (Exception ignored) {
+                // 引擎可能已退出
+            }
+        }
     }
 
     public void newGame() {
@@ -144,13 +162,15 @@ public class UciEngine {
         }
         jobs.add(() -> {
         });
-        try {
-            if (writer != null) {
-                writer.write("quit\n");
-                writer.flush();
+        synchronized (writeLock) {
+            try {
+                if (writer != null) {
+                    writer.write("quit\n");
+                    writer.flush();
+                }
+            } catch (Exception ignored) {
+                // 引擎可能已经退出
             }
-        } catch (Exception ignored) {
-            // 引擎可能已经退出
         }
         final Process p = process;
         if (p != null) {
@@ -184,7 +204,9 @@ public class UciEngine {
             }
             ProcessBuilder pb = new ProcessBuilder(enginePath);
             pb.redirectErrorStream(true);
-            File dir = new File(netPath).getParentFile();
+            File dir = netPath != null && !netPath.isEmpty()
+                    ? new File(netPath).getParentFile()
+                    : new File(enginePath).getParentFile();
             if (dir != null) {
                 pb.directory(dir);
             }
@@ -202,9 +224,11 @@ public class UciEngine {
                     break;
                 }
             }
-            send("setoption name EvalFile value " + netPath);
-            send("setoption name Threads value 2");
-            send("setoption name Hash value 64");
+            if (netPath != null && !netPath.isEmpty()) {
+                send("setoption name EvalFile value " + netPath);
+            }
+            send("setoption name Threads value 1");
+            send("setoption name Hash value 32");
             send("isready");
             while (true) {
                 if ("readyok".equals(nextLine(30))) {
@@ -265,15 +289,17 @@ public class UciEngine {
     }
 
     private void send(String command) {
-        if (writer == null) {
-            throw new IllegalStateException("引擎未启动");
-        }
-        try {
-            writer.write(command);
-            writer.newLine();
-            writer.flush();
-        } catch (Exception e) {
-            throw new IllegalStateException("无法向引擎写入命令：" + e.getMessage(), e);
+        synchronized (writeLock) {
+            if (writer == null) {
+                throw new IllegalStateException("引擎未启动");
+            }
+            try {
+                writer.write(command);
+                writer.newLine();
+                writer.flush();
+            } catch (Exception e) {
+                throw new IllegalStateException("无法向引擎写入命令：" + e.getMessage(), e);
+            }
         }
     }
 

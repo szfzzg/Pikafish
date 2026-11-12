@@ -14,14 +14,16 @@ REPO_DIR="$(cd "$APP_DIR/../.." && pwd)"
 SDK="${ANDROID_SDK_ROOT:-/opt/android-sdk}"
 BT_VERSION="34.0.0"
 NDK_VERSION="26.1.10909125"
-API=24
-TARGET_API=34
+MIN_API=24
+COMPILE_API=34
+# 使用 targetSdk 28 以便允许执行应用私有目录中导入的外置引擎（Android 10+ W^X 限制）。
+TARGET_API=28
 
 BT="$SDK/build-tools/$BT_VERSION"
 NDK="$SDK/ndk/$NDK_VERSION"
-PLATFORM="$SDK/platforms/android-$TARGET_API"
+PLATFORM="$SDK/platforms/android-$COMPILE_API"
 TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-CXX="$TOOLCHAIN/aarch64-linux-android${API}-clang++"
+CXX="$TOOLCHAIN/aarch64-linux-android${MIN_API}-clang++"
 STRIP="$TOOLCHAIN/llvm-strip"
 BUILD="$APP_DIR/build"
 APK="$APP_DIR/../PikafishXiangqi.apk"
@@ -29,7 +31,7 @@ APK="$APP_DIR/../PikafishXiangqi.apk"
 for path in "$BT/aapt2" "$PLATFORM/android.jar" "$CXX"; do
     if [ ! -e "$path" ]; then
         echo "缺少构建组件：$path" >&2
-        echo "请先安装：platforms;android-$TARGET_API build-tools;$BT_VERSION ndk;$NDK_VERSION" >&2
+        echo "请先安装：platforms;android-$COMPILE_API build-tools;$BT_VERSION ndk;$NDK_VERSION" >&2
         exit 1
     fi
 done
@@ -84,7 +86,7 @@ cp "$REPO_DIR/src/pikafish.nnue" "$BUILD/assets/pikafish.nnue"
     -I "$PLATFORM/android.jar" \
     --manifest "$APP_DIR/AndroidManifest.xml" \
     --java "$BUILD/gen" \
-    --min-sdk-version "$API" --target-sdk-version "$TARGET_API" \
+    --min-sdk-version "$MIN_API" --target-sdk-version "$TARGET_API" \
     -A "$BUILD/assets" \
     "$BUILD/res.zip"
 
@@ -93,7 +95,7 @@ javac --release 17 -encoding UTF-8 -classpath "$PLATFORM/android.jar" \
     -d "$BUILD/classes" "${JAVA_SOURCES[@]}"
 
 mapfile -t CLASSES < <(find "$BUILD/classes" -name '*.class')
-"$BT/d8" --release --min-api "$API" --lib "$PLATFORM/android.jar" \
+"$BT/d8" --release --min-api "$MIN_API" --lib "$PLATFORM/android.jar" \
     --output "$BUILD/dex" "${CLASSES[@]}"
 
 cp "$BUILD/base.apk" "$BUILD/unsigned.apk"
