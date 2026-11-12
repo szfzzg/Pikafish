@@ -20,4 +20,6 @@ __pycache__/
 # Android build
 app/android/build/
 app/android/debug.keystore
+.android-sdk/
+.jdk/
 

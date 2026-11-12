@@ -3,15 +3,26 @@
 # 依赖：Android SDK (platform 34, build-tools 34.0.0, NDK 26.1.10909125)、JDK 17+。
 set -euo pipefail
 
-# build-tools 34 的 d8 需要 JDK 17；若系统安装了则优先使用。
-if [ -x /usr/lib/jvm/java-17-openjdk-amd64/bin/javac ]; then
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$APP_DIR/../.." && pwd)"
+
+# build-tools 34 的 d8 需要 JDK 17；优先使用工作区内的便携 JDK。
+if [ -x "$REPO_DIR/.jdk/bin/javac" ]; then
+    export JAVA_HOME="$REPO_DIR/.jdk"
+    export PATH="$JAVA_HOME/bin:$PATH"
+elif [ -x /usr/lib/jvm/java-17-openjdk-amd64/bin/javac ]; then
     export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
     export PATH="$JAVA_HOME/bin:$PATH"
 fi
 
-APP_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(cd "$APP_DIR/../.." && pwd)"
-SDK="${ANDROID_SDK_ROOT:-/opt/android-sdk}"
+SDK="${ANDROID_SDK_ROOT:-}"
+if [ -z "$SDK" ] || [ ! -d "$SDK/platforms" ]; then
+    if [ -d "$REPO_DIR/.android-sdk/platforms" ]; then
+        SDK="$REPO_DIR/.android-sdk"
+    else
+        SDK="/opt/android-sdk"
+    fi
+fi
 BT_VERSION="34.0.0"
 NDK_VERSION="26.1.10909125"
 MIN_API=24

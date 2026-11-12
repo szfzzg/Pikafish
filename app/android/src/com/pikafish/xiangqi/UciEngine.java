@@ -64,9 +64,11 @@ public class UciEngine {
     private BufferedWriter writer;
     private Listener listener;
 
-    public void start(String enginePath, String netPath, Listener listener) {
+    public void start(String enginePath, String netPath, int threads, int hashMb, Listener listener) {
         this.listener = listener;
-        Thread worker = new Thread(() -> runEngine(enginePath, netPath), "pikafish-engine");
+        Thread worker = new Thread(
+                () -> runEngine(enginePath, netPath, Math.max(1, threads), Math.max(1, hashMb)),
+                "pikafish-engine");
         worker.start();
     }
 
@@ -197,7 +199,7 @@ public class UciEngine {
         }
     }
 
-    private void runEngine(String enginePath, String netPath) {
+    private void runEngine(String enginePath, String netPath, int threads, int hashMb) {
         try {
             if (closed.get()) {
                 return;
@@ -227,8 +229,8 @@ public class UciEngine {
             if (netPath != null && !netPath.isEmpty()) {
                 send("setoption name EvalFile value " + netPath);
             }
-            send("setoption name Threads value 1");
-            send("setoption name Hash value 32");
+            send("setoption name Threads value " + threads);
+            send("setoption name Hash value " + hashMb);
             send("isready");
             while (true) {
                 if ("readyok".equals(nextLine(30))) {

@@ -16,6 +16,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.OpenableColumns;
+import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -25,6 +26,7 @@ import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -36,6 +38,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -56,6 +59,9 @@ public class MainActivity extends Activity implements BoardView.Listener {
             "快速（0.5 秒）", "普通（1.5 秒）", "较强（3 秒）", "最强（5 秒）"
     };
     private static final int[] DIFFICULTY_MS = {500, 1500, 3000, 5000};
+    private static final int CUSTOM_DIFFICULTY_INDEX = 4;
+    private static final int DEFAULT_HASH_MB = 32;
+    private static final int DEFAULT_THREADS = 1;
     private static final String[] SIDE_NAMES = {"红方（先行）", "黑方（后行）"};
 
     private char humanSide = Board.RED;
@@ -83,6 +89,10 @@ public class MainActivity extends Activity implements BoardView.Listener {
     private boolean redErrorShown = false;
     private boolean blackErrorShown = false;
     private File bundledNet;
+    private int redHash = DEFAULT_HASH_MB;
+    private int redThreads = DEFAULT_THREADS;
+    private int blackHash = DEFAULT_HASH_MB;
+    private int blackThreads = DEFAULT_THREADS;
 
     private SharedPreferences prefs;
     private String redEnginePath = "";
@@ -106,10 +116,20 @@ public class MainActivity extends Activity implements BoardView.Listener {
     private Button undoButton;
     private Button analyzeButton;
     private Button settingsButton;
+    private Button customTimeButton;
     private CheckBox engineVsEngineBox;
     private Spinner strengthSpinner;
     private Spinner sideSpinner;
     private AlertDialog settingsDialog;
+    private ArrayAdapter<String> difficultyAdapter;
+    private final List<String> difficultyItems = new ArrayList<>();
+    private long customMoveTimeMs = 2000;
+    private boolean suppressDifficultyDialog = false;
+    private int lastDifficultyIndex = 1;
+    private EditText redHashInput;
+    private EditText redThreadsInput;
+    private EditText blackHashInput;
+    private EditText blackThreadsInput;
 
     private SoundPool soundPool;
     private int moveSoundId;
@@ -123,6 +143,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
     private long blackLastMoveMs = 0;
     private long currentMoveStartMs = -1;
     private char timingSide = 0;
+    private boolean clockStarted = false;
 
     private static class HistoryEntry {
         String uci;
@@ -142,6 +163,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         loadEngineSettings();
         humanSide = "b".equals(prefs.getString("human_side", "r")) ? Board.BLACK : Board.RED;
+        customMoveTimeMs = clampLong(prefs.getLong("custom_move_time_ms", 2000), 100, 600_000);
 
         buildUi();
         initSound();
@@ -318,15 +340,45 @@ public class MainActivity extends Activity implements BoardView.Listener {
         strengthLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         strengthLabel.setTextColor(0xFF5B3A1E);
         strengthSpinner = new Spinner(this);
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_item, DIFFICULTY_NAMES);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        strengthSpinner.setAdapter(adapter);
-        strengthSpinner.setSelection(1);
+        difficultyItems.clear();
+        Collections.addAll(difficultyItems, DIFFICULTY_NAMES);
+        difficultyItems.add("自定义…");
+        difficultyAdapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, difficultyItems);
+        difficultyAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        strengthSpinner.setAdapter(difficultyAdapter);
+        strengthSpinner.setSelection(1, false);
+        strengthSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (suppressDifficultyDialog) {
+                    return;
+                }
+                if (position == CUSTOM_DIFFICULTY_INDEX) {
+                    showCustomTimeDialog();
+                } else {
+                    lastDifficultyIndex = position;
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
         strengthRow.addView(strengthLabel, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         strengthRow.addView(strengthSpinner, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        customTimeButton = makeSmallButton("自定义");
+        LinearLayout.LayoutParams customTimeParams = new LinearLayout.LayoutParams(dp(72), dp(40));
+        customTimeParams.leftMargin = dp(8);
+        customTimeButton.setOnClickListener(v -> {
+            suppressDifficultyDialog = true;
+            strengthSpinner.setSelection(CUSTOM_DIFFICULTY_INDEX, false);
+            suppressDifficultyDialog = false;
+            showCustomTimeDialog();
+        });
+        strengthRow.addView(customTimeButton, customTimeParams);
         root.addView(strengthRow, strengthParams);
 
         newButton.setOnClickListener(v -> newGame());
@@ -463,6 +515,10 @@ public class MainActivity extends Activity implements BoardView.Listener {
         blackEngineLabel = prefs.getString("black_engine_label", "");
         blackNetPath = prefs.getString("black_net_path", "");
         blackNetLabel = prefs.getString("black_net_label", "");
+        redHash = clampInt(prefs.getInt("red_hash", DEFAULT_HASH_MB), 16, 1024);
+        redThreads = clampInt(prefs.getInt("red_threads", DEFAULT_THREADS), 1, 8);
+        blackHash = clampInt(prefs.getInt("black_hash", DEFAULT_HASH_MB), 16, 1024);
+        blackThreads = clampInt(prefs.getInt("black_threads", DEFAULT_THREADS), 1, 8);
     }
 
     private static String sideName(char side) {
@@ -601,7 +657,10 @@ public class MainActivity extends Activity implements BoardView.Listener {
             blackErrorShown = false;
         }
         updateEngineInfoViews();
-        engine.start(enginePath, netPath, new UciEngine.Listener() {
+        engine.start(enginePath, netPath,
+                side == Board.RED ? redThreads : blackThreads,
+                side == Board.RED ? redHash : blackHash,
+                new UciEngine.Listener() {
             @Override
             public void onReady() {
                 if (engineFor(side) != engine) {
@@ -797,7 +856,8 @@ public class MainActivity extends Activity implements BoardView.Listener {
 
         TextView note = new TextView(this);
         note.setText("导入的引擎需为 Android ARM64 可执行文件（ELF PIE），权重文件通常为 .nnue。"
-                + "文件会保存到应用私有目录，重启后仍然有效。");
+                + "文件会保存到应用私有目录，重启后仍然有效。"
+                + "哈希范围 16-1024 MB，线程数范围 1-8。");
         note.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         note.setTextColor(0xFF6B5B4A);
         note.setLineSpacing(dp(2), 1f);
@@ -813,11 +873,16 @@ public class MainActivity extends Activity implements BoardView.Listener {
         settingsDialog = new AlertDialog.Builder(this)
                 .setTitle("引擎设置")
                 .setView(scroll)
-                .setPositiveButton("关闭", null)
+                .setPositiveButton("保存并应用", (dialog, which) -> applyEngineTuning())
+                .setNegativeButton("关闭", null)
                 .create();
         settingsDialog.setOnDismissListener(dialog -> {
             redEngineInfoView = null;
             blackEngineInfoView = null;
+            redHashInput = null;
+            redThreadsInput = null;
+            blackHashInput = null;
+            blackThreadsInput = null;
             settingsDialog = null;
         });
         settingsDialog.show();
@@ -856,6 +921,94 @@ public class MainActivity extends Activity implements BoardView.Listener {
         buttonParams3.leftMargin = dp(6);
         row.addView(resetButton, buttonParams3);
         parent.addView(row, rowParams);
+
+        LinearLayout tuneRow = new LinearLayout(this);
+        tuneRow.setOrientation(LinearLayout.HORIZONTAL);
+        tuneRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams tuneParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tuneParams.topMargin = dp(6);
+
+        TextView hashLabel = new TextView(this);
+        hashLabel.setText("哈希(MB)：");
+        hashLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        hashLabel.setTextColor(0xFF5B3A1E);
+        EditText hashInput = makeNumberInput(side == Board.RED ? redHash : blackHash);
+        TextView threadsLabel = new TextView(this);
+        threadsLabel.setText("线程：");
+        threadsLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        threadsLabel.setTextColor(0xFF5B3A1E);
+        EditText threadsInput = makeNumberInput(side == Board.RED ? redThreads : blackThreads);
+
+        tuneRow.addView(hashLabel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        tuneRow.addView(hashInput, new LinearLayout.LayoutParams(0, dp(40), 1f));
+        LinearLayout.LayoutParams threadsLabelParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        threadsLabelParams.leftMargin = dp(10);
+        tuneRow.addView(threadsLabel, threadsLabelParams);
+        tuneRow.addView(threadsInput, new LinearLayout.LayoutParams(0, dp(40), 0.7f));
+        parent.addView(tuneRow, tuneParams);
+
+        if (side == Board.RED) {
+            redHashInput = hashInput;
+            redThreadsInput = threadsInput;
+        } else {
+            blackHashInput = hashInput;
+            blackThreadsInput = threadsInput;
+        }
+    }
+
+    private EditText makeNumberInput(int value) {
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setText(String.valueOf(value));
+        input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        input.setGravity(Gravity.CENTER);
+        input.setSingleLine(true);
+        return input;
+    }
+
+    private void applyEngineTuning() {
+        if (redHashInput == null || redThreadsInput == null
+                || blackHashInput == null || blackThreadsInput == null) {
+            return;
+        }
+        int newRedHash = clampInt(parseInt(redHashInput.getText().toString(), redHash), 16, 1024);
+        int newRedThreads = clampInt(parseInt(redThreadsInput.getText().toString(), redThreads), 1, 8);
+        int newBlackHash = clampInt(parseInt(blackHashInput.getText().toString(), blackHash), 16, 1024);
+        int newBlackThreads = clampInt(parseInt(blackThreadsInput.getText().toString(), blackThreads), 1, 8);
+
+        boolean redChanged = newRedHash != redHash || newRedThreads != redThreads;
+        boolean blackChanged = newBlackHash != blackHash || newBlackThreads != blackThreads;
+        redHash = newRedHash;
+        redThreads = newRedThreads;
+        blackHash = newBlackHash;
+        blackThreads = newBlackThreads;
+        prefs.edit()
+                .putInt("red_hash", redHash)
+                .putInt("red_threads", redThreads)
+                .putInt("black_hash", blackHash)
+                .putInt("black_threads", blackThreads)
+                .apply();
+
+        if (redChanged || blackChanged) {
+            cancelEngines();
+            if (redChanged) {
+                closeEngine(Board.RED);
+            }
+            if (blackChanged) {
+                closeEngine(Board.BLACK);
+            }
+            if (redChanged) {
+                startEngine(Board.RED);
+            }
+            if (blackChanged) {
+                startEngine(Board.BLACK);
+            }
+            updateControls();
+        }
+        Toast.makeText(this, "哈希/线程设置已保存并应用", Toast.LENGTH_SHORT).show();
     }
 
     private void pickFile(char side, boolean engineFile) {
@@ -1213,7 +1366,8 @@ public class MainActivity extends Activity implements BoardView.Listener {
     private void recordMove(Board.Move move) {
         long now = SystemClock.elapsedRealtime();
         char mover = board.side;
-        long moveMs = (timingSide == mover && currentMoveStartMs > 0)
+        boolean firstMove = history.isEmpty();
+        long moveMs = (!firstMove && timingSide == mover && currentMoveStartMs > 0)
                 ? Math.max(0, now - currentMoveStartMs) : 0;
 
         HistoryEntry entry = new HistoryEntry();
@@ -1226,6 +1380,9 @@ public class MainActivity extends Activity implements BoardView.Listener {
         entry.captured = board.applyMove(move);
         history.add(entry);
         lastMove = move;
+        if (firstMove) {
+            clockStarted = true;
+        }
 
         if (mover == Board.RED) {
             redTotalMs += moveMs;
@@ -1346,11 +1503,12 @@ public class MainActivity extends Activity implements BoardView.Listener {
         blackLastMoveMs = 0;
         timingSide = 0;
         currentMoveStartMs = -1;
+        clockStarted = false;
         updateTimerLabels();
     }
 
     private void armClock() {
-        if (gameOver || timingSide != 0) {
+        if (!clockStarted || gameOver || timingSide != 0) {
             return;
         }
         timingSide = board.side;
@@ -1374,6 +1532,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
         }
         timingSide = 0;
         currentMoveStartMs = -1;
+        clockStarted = !history.isEmpty();
         updateTimerLabels();
     }
 
@@ -1441,6 +1600,7 @@ public class MainActivity extends Activity implements BoardView.Listener {
         setControlEnabled(undoButton, !importing && !history.isEmpty());
         setControlEnabled(analyzeButton, idle && !engineVsEngine && isReady(opponentSide()));
         setControlEnabled(settingsButton, !importing);
+        setControlEnabled(customTimeButton, !importing);
         engineVsEngineBox.setEnabled(!importing);
         boolean sideSelectable = !importing && !engineVsEngine;
         sideSpinner.setEnabled(sideSelectable);
@@ -1462,10 +1622,70 @@ public class MainActivity extends Activity implements BoardView.Listener {
 
     private int difficultyMs() {
         int index = strengthSpinner.getSelectedItemPosition();
+        if (index == CUSTOM_DIFFICULTY_INDEX) {
+            return (int) customMoveTimeMs;
+        }
         if (index < 0 || index >= DIFFICULTY_MS.length) {
             index = 1;
         }
         return DIFFICULTY_MS[index];
+    }
+
+    private void selectCustomDifficulty() {
+        suppressDifficultyDialog = true;
+        strengthSpinner.setSelection(CUSTOM_DIFFICULTY_INDEX, false);
+        suppressDifficultyDialog = false;
+        lastDifficultyIndex = CUSTOM_DIFFICULTY_INDEX;
+    }
+
+    private void showCustomTimeDialog() {
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        input.setText(String.format(Locale.US, "%.1f", customMoveTimeMs / 1000.0));
+        input.setSelectAllOnFocus(true);
+        new AlertDialog.Builder(this)
+                .setTitle("自定义思考时间")
+                .setMessage("请输入每步搜索时间（秒，0.1 - 600）")
+                .setView(input)
+                .setPositiveButton("确定", (dialog, which) -> {
+                    try {
+                        double seconds = Double.parseDouble(input.getText().toString().trim());
+                        if (seconds < 0.1 || seconds > 600) {
+                            Toast.makeText(this, "请输入 0.1 - 600 之间的秒数",
+                                    Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        customMoveTimeMs = Math.round(seconds * 1000);
+                        prefs.edit().putLong("custom_move_time_ms", customMoveTimeMs).apply();
+                        selectCustomDifficulty();
+                    } catch (NumberFormatException e) {
+                        Toast.makeText(this, "请输入有效数字", Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setNegativeButton("取消", (dialog, which) -> {
+                    if (lastDifficultyIndex != CUSTOM_DIFFICULTY_INDEX) {
+                        suppressDifficultyDialog = true;
+                        strengthSpinner.setSelection(lastDifficultyIndex, false);
+                        suppressDifficultyDialog = false;
+                    }
+                })
+                .show();
+    }
+
+    private static int clampInt(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static long clampLong(long value, long min, long max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static int parseInt(String value, int fallback) {
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (Exception e) {
+            return fallback;
+        }
     }
 
     private static String describe(Exception e) {
